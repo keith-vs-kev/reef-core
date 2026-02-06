@@ -46,3 +46,7 @@ export function appendOutput(id: string, line: string): void {
 export function deleteSession(id: string): void {
   store.delete(id)
 }
+
+export function closeDatabase(): void {
+  store.close()
+}

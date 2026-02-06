@@ -38,6 +38,7 @@ export async function runOpenAIAgent(
   const { default: OpenAI } = await import('openai')
   const client = new OpenAI({ apiKey })
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- OpenAI SDK message types are complex union
   const messages: Array<any> = [
     {
       role: 'system',
@@ -73,6 +74,7 @@ export async function runOpenAIAgent(
     // Handle tool calls
     if (msg.tool_calls && msg.tool_calls.length > 0) {
       for (const tc of msg.tool_calls) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- SDK tool call shape
         const fn = (tc as any).function
         if (!fn) continue
         const args = JSON.parse(fn.arguments || '{}')
@@ -83,11 +85,9 @@ export async function runOpenAIAgent(
         try {
           const { stdout, stderr } = await execAsync(args.command, { cwd: workdir, timeout: 30000 })
           result = (stdout + stderr).slice(0, 4000)
-        } catch (err: any) {
-          result = `Error: ${err.message}\n${(err.stdout || '') + (err.stderr || '')}`.slice(
-            0,
-            4000
-          )
+        } catch (err: unknown) {
+          const e = err as { message: string; stdout?: string; stderr?: string }
+          result = `Error: ${e.message}\n${(e.stdout || '') + (e.stderr || '')}`.slice(0, 4000)
         }
 
         appendOutput(sessionId, result)

@@ -19,9 +19,42 @@ import { runGoogleAgent } from './providers/google.js'
 
 // Dynamic imports for Pi SDK (may not be available)
 let piSdkAvailable = false
+// Pi SDK dynamic imports — types not cleanly exported, use any
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 let createAgentSession: any
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 let getModel: any
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 let SessionManager: any
+
+/** Opaque Pi SDK session — we only use .subscribe(), .prompt(), .agent */
+interface PiSession {
+  subscribe: (listener: (event: PiSdkEvent) => void) => () => void
+  prompt: (text: string) => Promise<void>
+  agent?: { abort: () => void }
+}
+
+/** Minimal Pi SDK event shape */
+interface PiSdkEvent {
+  type: string
+  assistantMessageEvent?: {
+    type: string
+    content?: { type: string; text?: string }
+  }
+  message?: {
+    role: string
+    content: unknown
+  }
+  toolName?: string
+  toolCallId?: string
+  args?: unknown
+  isError?: boolean
+}
+
+interface ContentBlock {
+  type: string
+  text?: string
+}
 
 async function loadPiSdk(): Promise<boolean> {
   try {
@@ -47,7 +80,7 @@ const sdkReady = loadPiSdk()
 const runningSessions = new Map<
   string,
   {
-    session: any // AgentSession
+    session: PiSession
     unsubscribe: () => void
     abortController: AbortController
   }
@@ -178,7 +211,7 @@ async function spawnSdkAgent(
     emitReefEvent('session.new', sessionId, { task: opts.task, backend: 'sdk', model: model.id })
 
     // Subscribe to events
-    const unsubscribe = session.subscribe((event: any) => {
+    const unsubscribe = session.subscribe((event: PiSdkEvent) => {
       handleSdkEvent(sessionId, event)
     })
 
@@ -227,7 +260,7 @@ function spawnTmuxFallback(sessionId: string, opts: SpawnOptions, now: string): 
   return { sessionId, backend: 'tmux', row }
 }
 
-function handleSdkEvent(sessionId: string, event: any): void {
+function handleSdkEvent(sessionId: string, event: PiSdkEvent): void {
   switch (event.type) {
     case 'message_update': {
       // Stream assistant text
@@ -246,9 +279,9 @@ function handleSdkEvent(sessionId: string, event: any): void {
       if (message?.role === 'assistant') {
         // Full message complete
         const content = Array.isArray(message.content)
-          ? message.content
-              .filter((c: any) => c.type === 'text')
-              .map((c: any) => c.text)
+          ? (message.content as ContentBlock[])
+              .filter((c) => c.type === 'text')
+              .map((c) => c.text || '')
               .join('')
           : String(message.content || '')
         if (content) {
@@ -278,12 +311,13 @@ function handleSdkEvent(sessionId: string, event: any): void {
   }
 }
 
-function summarizeArgs(args: any): string {
+function summarizeArgs(args: unknown): string {
   if (!args) return ''
   if (typeof args === 'string') return args.slice(0, 80)
-  if (args.command) return args.command.slice(0, 80)
-  if (args.file_path) return args.file_path
-  if (args.path) return args.path
+  const obj = args as Record<string, unknown>
+  if (typeof obj.command === 'string') return obj.command.slice(0, 80)
+  if (typeof obj.file_path === 'string') return obj.file_path
+  if (typeof obj.path === 'string') return obj.path as string
   return JSON.stringify(args).slice(0, 80)
 }
 

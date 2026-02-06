@@ -100,7 +100,7 @@ function handleClientMessage(ws: WebSocket, state: ClientState, msg: WsClientMes
     default:
       sendWs(ws, {
         type: 'error',
-        data: `unknown message type: ${(msg as Record<string, unknown>).type}`,
+        data: `unknown message type: ${String((msg as Record<string, unknown>).type)}`,
       })
   }
 }

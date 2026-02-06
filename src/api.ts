@@ -5,6 +5,15 @@ import http from 'http'
 import { getAllSessions, getSession, updateSession } from './db.js'
 import { spawn, kill, getOutput, isAlive, sendMessage, getStats } from './agent.js'
 import { attachWebSocket, getWsStats } from './ws.js'
+import type {
+  SpawnRequest,
+  StatusResponse,
+  SessionListResponse,
+  SessionDetailResponse,
+  SessionOutputResponse,
+  SpawnResponse,
+  ErrorResponse,
+} from './shared-types.js'
 
 const PORT = parseInt(process.env.REEF_PORT || '7777', 10)
 
@@ -49,7 +58,7 @@ export function startServer(): http.Server {
           openai: !!process.env.OPENAI_API_KEY,
           google: !!(process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY),
         }
-        return json(res, {
+        const response: StatusResponse = {
           ok: true,
           version: '0.3.0',
           sessions: getAllSessions().length,
@@ -57,7 +66,8 @@ export function startServer(): http.Server {
           wsClients: wsStats.clients,
           uptime: process.uptime(),
           providers,
-        })
+        }
+        return json(res, response)
       }
 
       // GET /sessions
@@ -70,41 +80,48 @@ export function startServer(): http.Server {
             s.status = 'stopped'
           }
         }
-        return json(res, { sessions })
+        const response: SessionListResponse = { sessions }
+        return json(res, response)
       }
 
       // POST /sessions — spawn agent
       if (path === '/sessions' && req.method === 'POST') {
-        const body = JSON.parse(await readBody(req))
-        const task: string = body.task
-        const workdir: string | undefined = body.workdir
-        const model: string | undefined = body.model
-        const backend: 'sdk' | 'tmux' | undefined = body.backend
-        const provider: 'anthropic' | 'openai' | 'google' | undefined = body.provider
+        const body = JSON.parse(await readBody(req)) as SpawnRequest
+        const { task, workdir, model, backend, provider } = body
 
         if (!task) {
-          return json(res, { error: 'task is required' }, 400)
+          const err: ErrorResponse = { error: 'task is required' }
+          return json(res, err, 400)
         }
 
-        const result = await spawn({ task, workdir, model, provider, forceBackend: backend })
-        return json(res, { session: result.row, backend: result.backend }, 201)
+        const result = await spawn({
+          task,
+          workdir,
+          model,
+          provider,
+          forceBackend: backend as 'sdk' | 'tmux' | undefined,
+        })
+        const response: SpawnResponse = { session: result.row, backend: result.backend }
+        return json(res, response, 201)
       }
 
       // GET /sessions/:id
       const getMatch = path.match(/^\/sessions\/([^/]+)$/)
       if (getMatch && req.method === 'GET') {
         const session = getSession(getMatch[1])
-        if (!session) return json(res, { error: 'not found' }, 404)
-        return json(res, { session, alive: isAlive(session.id, session) })
+        if (!session) return json(res, { error: 'not found' } as ErrorResponse, 404)
+        const response: SessionDetailResponse = { session, alive: isAlive(session.id, session) }
+        return json(res, response)
       }
 
       // GET /sessions/:id/output
       const outputMatch = path.match(/^\/sessions\/([^/]+)\/output$/)
       if (outputMatch && req.method === 'GET') {
         const session = getSession(outputMatch[1])
-        if (!session) return json(res, { error: 'not found' }, 404)
+        if (!session) return json(res, { error: 'not found' } as ErrorResponse, 404)
         const output = getOutput(session.id, session)
-        return json(res, { id: session.id, output })
+        const response: SessionOutputResponse = { id: session.id, output }
+        return json(res, response)
       }
 
       // POST /sessions/:id/send
@@ -138,7 +155,7 @@ export function startServer(): http.Server {
   attachWebSocket(server)
 
   server.listen(PORT, () => {
-    console.log(`🦖 reef-core v0.2.0 listening on http://localhost:${PORT}`)
+    console.log(`🦖 reef-core v0.3.0 listening on http://localhost:${PORT}`)
     console.log(`🔌 WebSocket available at ws://localhost:${PORT}/ws`)
   })
 

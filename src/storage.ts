@@ -138,6 +138,10 @@ export class SqliteSessionStore implements SessionStore {
     this.db.prepare('DELETE FROM sessions WHERE id = ?').run(id)
   }
 
+  close(): void {
+    this.db.close()
+  }
+
   private hydrate(row: SessionDbRow): SessionRow {
     return {
       id: row.id,

@@ -9,6 +9,7 @@ import { promisify } from 'util'
 const execAsync = promisify(exec)
 
 // Tool definition built after import to use SDK types
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- Google SDK tool type
 let SHELL_TOOL: any
 
 export async function runGoogleAgent(
@@ -42,6 +43,7 @@ export async function runGoogleAgent(
 
   let turns = 0
   const maxTurns = 10
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Google SDK content types
   const contents: Array<any> = [{ role: 'user', parts: [{ text: task }] }]
 
   while (turns < maxTurns) {
@@ -62,6 +64,7 @@ export async function runGoogleAgent(
     contents.push({ role: 'model', parts: candidate.content.parts })
 
     let hasToolCalls = false
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Google SDK part types
     const toolResponseParts: any[] = []
 
     for (const part of candidate.content.parts) {
@@ -73,6 +76,7 @@ export async function runGoogleAgent(
       if (part.functionCall) {
         hasToolCalls = true
         const fc = part.functionCall
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Google SDK args
         const args = (fc.args as any) || {}
         emitReefEvent('tool.start', sessionId, { toolName: fc.name, args })
         appendOutput(sessionId, `⚡ ${fc.name}(${args.command || ''})`)
@@ -81,11 +85,9 @@ export async function runGoogleAgent(
         try {
           const { stdout, stderr } = await execAsync(args.command, { cwd: workdir, timeout: 30000 })
           result = (stdout + stderr).slice(0, 4000)
-        } catch (err: any) {
-          result = `Error: ${err.message}\n${(err.stdout || '') + (err.stderr || '')}`.slice(
-            0,
-            4000
-          )
+        } catch (err: unknown) {
+          const e = err as { message: string; stdout?: string; stderr?: string }
+          result = `Error: ${e.message}\n${(e.stdout || '') + (e.stderr || '')}`.slice(0, 4000)
         }
 
         appendOutput(sessionId, result)
