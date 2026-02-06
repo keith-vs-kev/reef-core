@@ -1,34 +1,32 @@
 /**
  * reef-core/events.ts — Event bus for WebSocket broadcasting
  */
-import { EventEmitter } from 'events';
+import { EventEmitter } from 'events'
+import type { ReefEvent, ReefEventType } from './shared-types.js'
 
-export interface ReefEvent {
-  type: 'output' | 'status' | 'session.new' | 'session.end' | 'tool.start' | 'tool.end';
-  sessionId: string;
-  data: any;
-  timestamp: string;
-}
+export type { ReefEvent } from './shared-types.js'
 
 class ReefEventBus extends EventEmitter {
-  emit(event: 'reef', payload: ReefEvent): boolean;
-  emit(event: string, ...args: any[]): boolean {
-    return super.emit(event, ...args);
+  emitReef(payload: ReefEvent): boolean {
+    return super.emit('reef', payload)
   }
 
-  on(event: 'reef', listener: (payload: ReefEvent) => void): this;
-  on(event: string, listener: (...args: any[]) => void): this {
-    return super.on(event, listener);
+  onReef(listener: (payload: ReefEvent) => void): this {
+    return super.on('reef', listener)
   }
 }
 
-export const eventBus = new ReefEventBus();
+export const eventBus = new ReefEventBus()
 
-export function emitReefEvent(type: ReefEvent['type'], sessionId: string, data: any): void {
-  eventBus.emit('reef', {
+export function emitReefEvent(
+  type: ReefEventType,
+  sessionId: string,
+  data: Record<string, unknown>
+): void {
+  eventBus.emitReef({
     type,
     sessionId,
     data,
     timestamp: new Date().toISOString(),
-  });
+  } as ReefEvent)
 }
