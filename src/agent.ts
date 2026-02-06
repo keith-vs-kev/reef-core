@@ -1,94 +1,17 @@
 /**
- * reef-core/agent.ts — Pi SDK agent management
+ * reef-core/agent.ts — Thin orchestrator wiring SessionManager + ProviderRouter
  *
- * Uses @mariozechner/pi-coding-agent createAgentSession() for proper
- * streaming, events, and tool use visibility.
- * Falls back to tmux if SDK fails.
+ * Routes spawn requests to the appropriate backend:
+ * - OpenAI/Google → ProviderRouter (registry-based providers)
+ * - Anthropic → SessionManager (Pi SDK special case, or tmux fallback)
  */
-import crypto from 'crypto'
-import { type SessionRow, insertSession, updateSession, appendOutput } from './db.js'
-import { emitReefEvent } from './events.js'
-import {
-  spawnAgent as spawnTmuxAgent,
-  killSession as killTmuxSession,
-  captureOutput,
-  sessionExists,
-} from './tmux.js'
-import { runOpenAIAgent } from './providers/openai.js'
-import { runGoogleAgent } from './providers/google.js'
+import type { SessionRow } from './db.js'
+import { SessionManager } from './session-manager.js'
+import { ProviderRouter } from './provider-router.js'
 
-// Dynamic imports for Pi SDK (may not be available)
-let piSdkAvailable = false
-// Pi SDK dynamic imports — types not cleanly exported, use any
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let createAgentSession: any
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let getModel: any
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let SessionManager: any
-
-/** Opaque Pi SDK session — we only use .subscribe(), .prompt(), .agent */
-interface PiSession {
-  subscribe: (listener: (event: PiSdkEvent) => void) => () => void
-  prompt: (text: string) => Promise<void>
-  agent?: { abort: () => void }
-}
-
-/** Minimal Pi SDK event shape */
-interface PiSdkEvent {
-  type: string
-  assistantMessageEvent?: {
-    type: string
-    content?: { type: string; text?: string }
-  }
-  message?: {
-    role: string
-    content: unknown
-  }
-  toolName?: string
-  toolCallId?: string
-  args?: unknown
-  isError?: boolean
-}
-
-interface ContentBlock {
-  type: string
-  text?: string
-}
-
-async function loadPiSdk(): Promise<boolean> {
-  try {
-    const codingAgent = await import('@mariozechner/pi-coding-agent')
-    createAgentSession = codingAgent.createAgentSession
-    SessionManager = codingAgent.SessionManager
-    const ai = await import('@mariozechner/pi-ai')
-    getModel = ai.getModel
-    piSdkAvailable = true
-    console.log('✅ Pi SDK loaded successfully')
-    return true
-  } catch (err) {
-    console.warn('⚠️  Pi SDK not available, using tmux fallback:', (err as Error).message)
-    piSdkAvailable = false
-    return false
-  }
-}
-
-// Initialize on module load
-const sdkReady = loadPiSdk()
-
-// Track running SDK sessions
-const runningSessions = new Map<
-  string,
-  {
-    session: PiSession
-    unsubscribe: () => void
-    abortController: AbortController
-  }
->()
-
-function uid(): string {
-  return crypto.randomBytes(6).toString('hex')
-}
+// Singletons
+const sessionMgr = new SessionManager()
+const providerRouter = new ProviderRouter(sessionMgr)
 
 export interface SpawnOptions {
   task: string
@@ -105,292 +28,64 @@ export interface SpawnResult {
 }
 
 /**
- * Spawn an agent session. Tries Pi SDK first, falls back to tmux.
+ * Spawn an agent session.
  */
 export async function spawn(opts: SpawnOptions): Promise<SpawnResult> {
-  await sdkReady
+  await sessionMgr.waitForSdk()
 
-  const sessionId = uid()
-  const now = new Date().toISOString()
+  const sessionId = sessionMgr.generateId()
   const provider = opts.provider || 'anthropic'
 
-  // Route to provider-specific agents
-  if (provider === 'openai') {
-    return spawnProviderAgent(sessionId, opts, now, 'openai')
-  }
-  if (provider === 'google') {
-    return spawnProviderAgent(sessionId, opts, now, 'google')
+  // Route OpenAI/Google through provider registry
+  if (provider === 'openai' || provider === 'google') {
+    const row = await providerRouter.route(sessionId, opts.task, provider, opts.model, opts.workdir)
+    return { sessionId, backend: provider, row }
   }
 
-  // Anthropic: use existing SDK/tmux path
-  const backend = opts.forceBackend || (piSdkAvailable ? 'sdk' : 'tmux')
+  // Anthropic: Pi SDK or tmux fallback
+  // Pi SDK uses a fundamentally different session model (createAgentSession + subscribe/prompt)
+  // that doesn't fit the simple AgentProvider.run() interface, so it's a special case.
+  const backend = opts.forceBackend || (sessionMgr.isPiSdkAvailable() ? 'sdk' : 'tmux')
   if (backend === 'sdk') {
-    return spawnSdkAgent(sessionId, opts, now)
-  } else {
-    return spawnTmuxFallback(sessionId, opts, now)
-  }
-}
-
-async function spawnProviderAgent(
-  sessionId: string,
-  opts: SpawnOptions,
-  now: string,
-  provider: 'openai' | 'google'
-): Promise<SpawnResult> {
-  const defaultModels = {
-    openai: 'gpt-4o',
-    google: 'gemini-2.5-flash',
-  }
-  const model = opts.model || defaultModels[provider]
-  const workdir = opts.workdir || process.cwd()
-
-  const row: SessionRow = {
-    id: sessionId,
-    task: opts.task,
-    status: 'running',
-    backend: provider,
-    provider,
-    model,
-    created_at: now,
-    updated_at: now,
-    output: [],
-  }
-  insertSession(row)
-  emitReefEvent('session.new', sessionId, { task: opts.task, backend: provider, model, provider })
-
-  // Run asynchronously
-  const runner =
-    provider === 'openai'
-      ? runOpenAIAgent(sessionId, opts.task, model, workdir)
-      : runGoogleAgent(sessionId, opts.task, model, workdir)
-
-  runner
-    .then(() => {
-      updateSession(sessionId, { status: 'completed' })
-      emitReefEvent('status', sessionId, { status: 'completed' })
-      emitReefEvent('session.end', sessionId, { reason: 'completed' })
-    })
-    .catch((err: Error) => {
-      const msg = `Error: ${err.message}`
-      appendOutput(sessionId, msg)
-      emitReefEvent('output', sessionId, { text: msg })
-      updateSession(sessionId, { status: 'error' })
-      emitReefEvent('status', sessionId, { status: 'error', error: err.message })
-    })
-
-  return { sessionId, backend: provider, row }
-}
-
-async function spawnSdkAgent(
-  sessionId: string,
-  opts: SpawnOptions,
-  now: string
-): Promise<SpawnResult> {
-  try {
-    const model = opts.model
-      ? getModel('anthropic', opts.model)
-      : getModel('anthropic', 'claude-sonnet-4-20250514')
-
-    const { session } = await createAgentSession({
-      cwd: opts.workdir || process.cwd(),
-      model,
-      sessionManager: SessionManager.inMemory(),
-    })
-
-    const row: SessionRow = {
-      id: sessionId,
-      task: opts.task,
-      status: 'running',
-      backend: 'sdk',
-      model: model.id,
-      created_at: now,
-      updated_at: now,
-      output: [],
+    try {
+      const row = await sessionMgr.spawnSdkSession(
+        sessionId,
+        opts.task,
+        opts.model,
+        opts.workdir || process.cwd()
+      )
+      return { sessionId, backend: 'sdk', row }
+    } catch (err) {
+      console.warn(
+        `SDK spawn failed for ${sessionId}, falling back to tmux:`,
+        (err as Error).message
+      )
+      const row = sessionMgr.spawnTmuxSession(sessionId, opts.task, opts.workdir)
+      return { sessionId, backend: 'tmux', row }
     }
-    insertSession(row)
-    emitReefEvent('session.new', sessionId, { task: opts.task, backend: 'sdk', model: model.id })
-
-    // Subscribe to events
-    const unsubscribe = session.subscribe((event: PiSdkEvent) => {
-      handleSdkEvent(sessionId, event)
-    })
-
-    const abortController = new AbortController()
-    runningSessions.set(sessionId, { session, unsubscribe, abortController })
-
-    // Run the prompt asynchronously
-    session
-      .prompt(opts.task)
-      .then(() => {
-        updateSession(sessionId, { status: 'completed' })
-        emitReefEvent('status', sessionId, { status: 'completed' })
-        emitReefEvent('session.end', sessionId, { reason: 'completed' })
-        runningSessions.delete(sessionId)
-      })
-      .catch((err: Error) => {
-        const msg = `Error: ${err.message}`
-        appendOutput(sessionId, msg)
-        emitReefEvent('output', sessionId, { text: msg })
-        updateSession(sessionId, { status: 'error' })
-        emitReefEvent('status', sessionId, { status: 'error', error: err.message })
-        runningSessions.delete(sessionId)
-      })
-
-    return { sessionId, backend: 'sdk', row }
-  } catch (err) {
-    console.warn(`SDK spawn failed for ${sessionId}, falling back to tmux:`, (err as Error).message)
-    return spawnTmuxFallback(sessionId, opts, now)
   }
-}
 
-function spawnTmuxFallback(sessionId: string, opts: SpawnOptions, now: string): SpawnResult {
-  const tmux = spawnTmuxAgent(opts.task, opts.workdir)
-  const row: SessionRow = {
-    id: sessionId,
-    task: opts.task,
-    status: 'running',
-    backend: 'tmux',
-    tmux_session: tmux.tmuxSession,
-    created_at: now,
-    updated_at: now,
-    output: [],
-  }
-  insertSession(row)
-  emitReefEvent('session.new', sessionId, { task: opts.task, backend: 'tmux' })
+  const row = sessionMgr.spawnTmuxSession(sessionId, opts.task, opts.workdir)
   return { sessionId, backend: 'tmux', row }
 }
 
-function handleSdkEvent(sessionId: string, event: PiSdkEvent): void {
-  switch (event.type) {
-    case 'message_update': {
-      // Stream assistant text
-      const msg = event.assistantMessageEvent
-      if (msg?.type === 'content' && msg.content?.type === 'text') {
-        const text = msg.content.text || ''
-        if (text) {
-          appendOutput(sessionId, text)
-          emitReefEvent('output', sessionId, { text, streaming: true })
-        }
-      }
-      break
-    }
-    case 'message_end': {
-      const message = event.message
-      if (message?.role === 'assistant') {
-        // Full message complete
-        const content = Array.isArray(message.content)
-          ? (message.content as ContentBlock[])
-              .filter((c) => c.type === 'text')
-              .map((c) => c.text || '')
-              .join('')
-          : String(message.content || '')
-        if (content) {
-          emitReefEvent('output', sessionId, { text: content, complete: true })
-        }
-      }
-      break
-    }
-    case 'tool_execution_start':
-      emitReefEvent('tool.start', sessionId, {
-        toolName: event.toolName,
-        toolCallId: event.toolCallId,
-        args: event.args,
-      })
-      appendOutput(sessionId, `⚡ ${event.toolName}(${summarizeArgs(event.args)})`)
-      break
-    case 'tool_execution_end':
-      emitReefEvent('tool.end', sessionId, {
-        toolName: event.toolName,
-        toolCallId: event.toolCallId,
-        isError: event.isError,
-      })
-      break
-    case 'turn_start':
-      emitReefEvent('output', sessionId, { text: '--- turn ---', meta: true })
-      break
-  }
-}
-
-function summarizeArgs(args: unknown): string {
-  if (!args) return ''
-  if (typeof args === 'string') return args.slice(0, 80)
-  const obj = args as Record<string, unknown>
-  if (typeof obj.command === 'string') return obj.command.slice(0, 80)
-  if (typeof obj.file_path === 'string') return obj.file_path
-  if (typeof obj.path === 'string') return obj.path as string
-  return JSON.stringify(args).slice(0, 80)
-}
-
-/**
- * Send a message to a running SDK session
- */
 export async function sendMessage(sessionId: string, message: string): Promise<boolean> {
-  const running = runningSessions.get(sessionId)
-  if (!running) return false
-
-  try {
-    await running.session.prompt(message)
-    return true
-  } catch {
-    return false
-  }
+  return sessionMgr.sendMessage(sessionId, message)
 }
 
-/**
- * Kill a running session (SDK or tmux)
- */
 export function kill(sessionId: string, row: SessionRow): void {
-  // SDK session
-  const running = runningSessions.get(sessionId)
-  if (running) {
-    running.session.agent?.abort()
-    running.unsubscribe()
-    runningSessions.delete(sessionId)
-  }
-
-  // Tmux session
-  if (row.tmux_session) {
-    killTmuxSession(row.tmux_session)
-  }
-
-  emitReefEvent('session.end', sessionId, { reason: 'killed' })
+  sessionMgr.kill(sessionId, row)
 }
 
-/**
- * Get output for a session
- */
 export function getOutput(sessionId: string, row: SessionRow): string {
-  // SDK sessions store output in DB
-  if (row.backend === 'sdk') {
-    return row.output.join('\n')
-  }
-  // Tmux sessions capture from pane
-  if (row.tmux_session) {
-    return captureOutput(row.tmux_session)
-  }
-  return ''
+  return sessionMgr.getOutput(sessionId, row)
 }
 
-/**
- * Check if a session is still alive
- */
 export function isAlive(sessionId: string, row: SessionRow): boolean {
-  if (row.backend === 'sdk') {
-    return runningSessions.has(sessionId)
-  }
-  if (row.tmux_session) {
-    return sessionExists(row.tmux_session)
-  }
-  return false
+  return sessionMgr.isAlive(sessionId, row)
 }
 
-/**
- * Get stats about running sessions
- */
 export function getStats(): { sdk: number; tmux: number; total: number } {
-  return {
-    sdk: runningSessions.size,
-    tmux: 0, // Could count tmux sessions if needed
-    total: runningSessions.size,
-  }
+  const stats = sessionMgr.getStats()
+  return { sdk: stats.sdk, tmux: stats.tmux, total: stats.total }
 }

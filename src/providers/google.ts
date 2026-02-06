@@ -76,7 +76,7 @@ export const googleProvider: AgentProvider = {
           ctx.onEvent({
             type: 'tool.start',
             sessionId: ctx.sessionId,
-            data: { toolName: fc.name, toolCallId: fc.name, args },
+            data: { toolName: fc.name || 'unknown', toolCallId: fc.name || 'unknown', args },
           })
           ctx.onOutput(`⚡ ${fc.name}(${args.command || ''})`)
 
@@ -96,7 +96,7 @@ export const googleProvider: AgentProvider = {
           ctx.onEvent({
             type: 'tool.end',
             sessionId: ctx.sessionId,
-            data: { toolName: fc.name, toolCallId: fc.name },
+            data: { toolName: fc.name || 'unknown', toolCallId: fc.name || 'unknown' },
           })
           ctx.onEvent({
             type: 'output',
