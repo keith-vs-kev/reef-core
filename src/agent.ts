@@ -9,6 +9,8 @@ import crypto from 'crypto';
 import { type SessionRow, insertSession, updateSession, appendOutput } from './db.js';
 import { emitReefEvent } from './events.js';
 import { spawnAgent as spawnTmuxAgent, killSession as killTmuxSession, captureOutput, sessionExists } from './tmux.js';
+import { runOpenAIAgent } from './providers/openai.js';
+import { runGoogleAgent } from './providers/google.js';
 
 // Dynamic imports for Pi SDK (may not be available)
 let piSdkAvailable = false;
@@ -51,12 +53,13 @@ export interface SpawnOptions {
   task: string;
   workdir?: string;
   model?: string;
+  provider?: 'anthropic' | 'openai' | 'google';
   forceBackend?: 'sdk' | 'tmux';
 }
 
 export interface SpawnResult {
   sessionId: string;
-  backend: 'sdk' | 'tmux';
+  backend: 'sdk' | 'tmux' | 'openai' | 'google';
   row: SessionRow;
 }
 
@@ -68,13 +71,70 @@ export async function spawn(opts: SpawnOptions): Promise<SpawnResult> {
   
   const sessionId = uid();
   const now = new Date().toISOString();
-  const backend = opts.forceBackend || (piSdkAvailable ? 'sdk' : 'tmux');
+  const provider = opts.provider || 'anthropic';
 
+  // Route to provider-specific agents
+  if (provider === 'openai') {
+    return spawnProviderAgent(sessionId, opts, now, 'openai');
+  }
+  if (provider === 'google') {
+    return spawnProviderAgent(sessionId, opts, now, 'google');
+  }
+
+  // Anthropic: use existing SDK/tmux path
+  const backend = opts.forceBackend || (piSdkAvailable ? 'sdk' : 'tmux');
   if (backend === 'sdk') {
     return spawnSdkAgent(sessionId, opts, now);
   } else {
     return spawnTmuxFallback(sessionId, opts, now);
   }
+}
+
+async function spawnProviderAgent(
+  sessionId: string,
+  opts: SpawnOptions,
+  now: string,
+  provider: 'openai' | 'google',
+): Promise<SpawnResult> {
+  const defaultModels = {
+    openai: 'gpt-4o',
+    google: 'gemini-2.5-flash',
+  };
+  const model = opts.model || defaultModels[provider];
+  const workdir = opts.workdir || process.cwd();
+
+  const row: SessionRow = {
+    id: sessionId,
+    task: opts.task,
+    status: 'running',
+    backend: provider,
+    provider,
+    model,
+    created_at: now,
+    updated_at: now,
+    output: [],
+  };
+  insertSession(row);
+  emitReefEvent('session.new', sessionId, { task: opts.task, backend: provider, model, provider });
+
+  // Run asynchronously
+  const runner = provider === 'openai'
+    ? runOpenAIAgent(sessionId, opts.task, model, workdir)
+    : runGoogleAgent(sessionId, opts.task, model, workdir);
+
+  runner.then(() => {
+    updateSession(sessionId, { status: 'completed' });
+    emitReefEvent('status', sessionId, { status: 'completed' });
+    emitReefEvent('session.end', sessionId, { reason: 'completed' });
+  }).catch((err: Error) => {
+    const msg = `Error: ${err.message}`;
+    appendOutput(sessionId, msg);
+    emitReefEvent('output', sessionId, { text: msg });
+    updateSession(sessionId, { status: 'error' });
+    emitReefEvent('status', sessionId, { status: 'error', error: err.message });
+  });
+
+  return { sessionId, backend: provider, row };
 }
 
 async function spawnSdkAgent(sessionId: string, opts: SpawnOptions, now: string): Promise<SpawnResult> {

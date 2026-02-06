@@ -11,7 +11,8 @@ export interface SessionRow {
   id: string;
   task: string;
   status: 'running' | 'stopped' | 'error' | 'completed';
-  backend: 'sdk' | 'tmux';
+  backend: 'sdk' | 'tmux' | 'openai' | 'google';
+  provider?: 'anthropic' | 'openai' | 'google';
   tmux_session?: string;
   model?: string;
   created_at: string;

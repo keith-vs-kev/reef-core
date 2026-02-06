@@ -42,13 +42,19 @@ export function startServer(): http.Server {
       if (path === '/status' && req.method === 'GET') {
         const agentStats = getStats();
         const wsStats = getWsStats();
+        const providers = {
+          anthropic: !!process.env.ANTHROPIC_API_KEY,
+          openai: !!process.env.OPENAI_API_KEY,
+          google: !!(process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY),
+        };
         return json(res, {
           ok: true,
-          version: '0.2.0',
+          version: '0.3.0',
           sessions: getAllSessions().length,
           running: agentStats,
           wsClients: wsStats.clients,
           uptime: process.uptime(),
+          providers,
         });
       }
 
@@ -72,12 +78,13 @@ export function startServer(): http.Server {
         const workdir: string | undefined = body.workdir;
         const model: string | undefined = body.model;
         const backend: 'sdk' | 'tmux' | undefined = body.backend;
+        const provider: 'anthropic' | 'openai' | 'google' | undefined = body.provider;
 
         if (!task) {
           return json(res, { error: 'task is required' }, 400);
         }
 
-        const result = await spawn({ task, workdir, model, forceBackend: backend });
+        const result = await spawn({ task, workdir, model, provider, forceBackend: backend });
         return json(res, { session: result.row, backend: result.backend }, 201);
       }
 

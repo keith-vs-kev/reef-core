@@ -11,9 +11,11 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@mariozechner/pi-ai": "^0.52.6",
+    "@google/generative-ai": "^0.24.1",
     "@mariozechner/pi-agent-core": "^0.52.6",
+    "@mariozechner/pi-ai": "^0.52.6",
     "@mariozechner/pi-coding-agent": "^0.52.6",
+    "openai": "^6.18.0",
     "ws": "^8.18.0"
   },
   "devDependencies": {
