@@ -119,6 +119,55 @@ export interface ErrorResponse {
   error: string
 }
 
+// ─── User Management ───
+
+export interface User {
+  id: string
+  email: string
+  name: string
+  role: 'admin' | 'user'
+  active: boolean
+  created_at: string
+  updated_at: string
+  last_login?: string
+}
+
+export interface CreateUserRequest {
+  email: string
+  name: string
+  password: string
+  role?: 'admin' | 'user'
+}
+
+export interface UpdateUserRequest {
+  email?: string
+  name?: string
+  password?: string
+  role?: 'admin' | 'user'
+  active?: boolean
+}
+
+export interface LoginRequest {
+  email: string
+  password: string
+}
+
+export interface UserResponse {
+  user: User
+}
+
+export interface UsersListResponse {
+  users: User[]
+  total: number
+  page: number
+  limit: number
+}
+
+export interface LoginResponse {
+  user: User
+  token: string
+}
+
 // ─── WebSocket Messages ───
 
 export type WsClientMessage =

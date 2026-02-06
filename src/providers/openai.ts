@@ -1,10 +1,9 @@
 /**
- * OpenAI provider — chat completions with optional tool use
+ * OpenAI provider — chat completions with tool use
  */
-import { appendOutput } from '../db.js'
-import { emitReefEvent } from '../events.js'
 import { exec } from 'child_process'
 import { promisify } from 'util'
+import type { AgentProvider, ProviderContext } from './types.js'
 
 const execAsync = promisify(exec)
 
@@ -25,86 +24,101 @@ const TOOL_DEFS = [
   },
 ]
 
-export async function runOpenAIAgent(
-  sessionId: string,
-  task: string,
-  model: string,
-  workdir: string
-): Promise<void> {
-  const apiKey = process.env.OPENAI_API_KEY
-  if (!apiKey) throw new Error('OPENAI_API_KEY not set')
+export const openaiProvider: AgentProvider = {
+  name: 'openai',
 
-  // Dynamic import to avoid issues if package missing
-  const { default: OpenAI } = await import('openai')
-  const client = new OpenAI({ apiKey })
+  async run(ctx: ProviderContext): Promise<void> {
+    const apiKey = process.env.OPENAI_API_KEY
+    if (!apiKey) throw new Error('OPENAI_API_KEY not set')
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- OpenAI SDK message types are complex union
-  const messages: Array<any> = [
-    {
-      role: 'system',
-      content: 'You are a helpful assistant. You can execute shell commands using the shell tool.',
-    },
-    { role: 'user', content: task },
-  ]
+    const { default: OpenAI } = await import('openai')
+    const client = new OpenAI({ apiKey })
 
-  let turns = 0
-  const maxTurns = 10
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const messages: Array<any> = [
+      {
+        role: 'system',
+        content:
+          'You are a helpful assistant. You can execute shell commands using the shell tool.',
+      },
+      { role: 'user', content: ctx.task },
+    ]
 
-  while (turns < maxTurns) {
-    turns++
+    let turns = 0
+    const maxTurns = 10
 
-    const response = await client.chat.completions.create({
-      model,
-      messages,
-      tools: TOOL_DEFS,
-    })
+    while (turns < maxTurns) {
+      if (ctx.signal.aborted) break
+      turns++
 
-    const choice = response.choices[0]
-    if (!choice?.message) break
+      const response = await client.chat.completions.create({
+        model: ctx.model,
+        messages,
+        tools: TOOL_DEFS,
+      })
 
-    const msg = choice.message
-    messages.push(msg)
+      const choice = response.choices[0]
+      if (!choice?.message) break
 
-    // Emit text content
-    if (msg.content) {
-      appendOutput(sessionId, msg.content)
-      emitReefEvent('output', sessionId, { text: msg.content })
-    }
+      const msg = choice.message
+      messages.push(msg)
 
-    // Handle tool calls
-    if (msg.tool_calls && msg.tool_calls.length > 0) {
-      for (const tc of msg.tool_calls) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- SDK tool call shape
-        const fn = (tc as any).function
-        if (!fn) continue
-        const args = JSON.parse(fn.arguments || '{}')
-        emitReefEvent('tool.start', sessionId, { toolName: fn.name, args })
-        appendOutput(sessionId, `⚡ ${fn.name}(${args.command || ''})`)
-
-        let result: string
-        try {
-          const { stdout, stderr } = await execAsync(args.command, { cwd: workdir, timeout: 30000 })
-          result = (stdout + stderr).slice(0, 4000)
-        } catch (err: unknown) {
-          const e = err as { message: string; stdout?: string; stderr?: string }
-          result = `Error: ${e.message}\n${(e.stdout || '') + (e.stderr || '')}`.slice(0, 4000)
-        }
-
-        appendOutput(sessionId, result)
-        emitReefEvent('tool.end', sessionId, { toolName: fn.name })
-        emitReefEvent('output', sessionId, { text: result })
-
-        messages.push({
-          role: 'tool' as const,
-          tool_call_id: tc.id,
-          content: result,
+      if (msg.content) {
+        ctx.onOutput(msg.content)
+        ctx.onEvent({
+          type: 'output',
+          sessionId: ctx.sessionId,
+          data: { text: msg.content },
         })
       }
-      // Continue loop for model to process tool results
-      continue
-    }
 
-    // No tool calls — done
-    break
-  }
+      if (msg.tool_calls && msg.tool_calls.length > 0) {
+        for (const tc of msg.tool_calls) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const fn = (tc as any).function
+          if (!fn) continue
+          const args = JSON.parse(fn.arguments || '{}')
+          ctx.onEvent({
+            type: 'tool.start',
+            sessionId: ctx.sessionId,
+            data: { toolName: fn.name, toolCallId: tc.id, args },
+          })
+          ctx.onOutput(`⚡ ${fn.name}(${args.command || ''})`)
+
+          let result: string
+          try {
+            const { stdout, stderr } = await execAsync(args.command, {
+              cwd: ctx.workdir,
+              timeout: 30000,
+            })
+            result = (stdout + stderr).slice(0, 4000)
+          } catch (err: unknown) {
+            const e = err as { message: string; stdout?: string; stderr?: string }
+            result = `Error: ${e.message}\n${(e.stdout || '') + (e.stderr || '')}`.slice(0, 4000)
+          }
+
+          ctx.onOutput(result)
+          ctx.onEvent({
+            type: 'tool.end',
+            sessionId: ctx.sessionId,
+            data: { toolName: fn.name, toolCallId: tc.id },
+          })
+          ctx.onEvent({
+            type: 'output',
+            sessionId: ctx.sessionId,
+            data: { text: result },
+          })
+
+          messages.push({
+            role: 'tool' as const,
+            tool_call_id: tc.id,
+            content: result,
+          })
+        }
+        continue
+      }
+
+      break
+    }
+  },
 }
