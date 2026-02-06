@@ -1,165 +1,149 @@
-<p align="center">
-  <img src="assets/nanoclaw-logo.png" alt="NanoClaw" width="400">
-</p>
+# reef-core 🦖
 
-<p align="center">
-  My personal Claude assistant that runs securely in containers. Lightweight and built to be understood and customized for your own needs.
-</p>
-
-## Why I Built This
-
-[OpenClaw](https://github.com/openclaw/openclaw) is an impressive project with a great vision. But I can't sleep well running software I don't understand with access to my life. OpenClaw has 52+ modules, 8 config management files, 45+ dependencies, and abstractions for 15 channel providers. Security is application-level (allowlists, pairing codes) rather than OS isolation. Everything runs in one Node process with shared memory.
-
-NanoClaw gives you the same core functionality in a codebase you can understand in 8 minutes. One process. A handful of files. Agents run in actual Linux containers with filesystem isolation, not behind permission checks.
-
-## Quick Start
-
-```bash
-git clone https://github.com/gavrielc/nanoclaw.git
-cd nanoclaw
-claude
-```
-
-Then run `/setup`. Claude Code handles everything: dependencies, authentication, container setup, service configuration.
-
-## Philosophy
-
-**Small enough to understand.** One process, a few source files. No microservices, no message queues, no abstraction layers. Have Claude Code walk you through it.
-
-**Secure by isolation.** Agents run in Linux containers (Apple Container on macOS, or Docker). They can only see what's explicitly mounted. Bash access is safe because commands run inside the container, not on your host.
-
-**Built for one user.** This isn't a framework. It's working software that fits my exact needs. You fork it and have Claude Code make it match your exact needs.
-
-**Customization = code changes.** No configuration sprawl. Want different behavior? Modify the code. The codebase is small enough that this is safe.
-
-**AI-native.** No installation wizard; Claude Code guides setup. No monitoring dashboard; ask Claude what's happening. No debugging tools; describe the problem, Claude fixes it.
-
-**Skills over features.** Contributors shouldn't add features (e.g. support for Telegram) to the codebase. Instead, they contribute [claude code skills](https://code.claude.com/docs/en/skills) like `/add-telegram` that transform your fork. You end up with clean code that does exactly what you need.
-
-**Best harness, best model.** This runs on Claude Agent SDK, which means you're running Claude Code directly. The harness matters. A bad harness makes even smart models seem dumb, a good harness gives them superpowers. Claude Code is (IMO) the best harness available.
-
-## What It Supports
-
-- **WhatsApp I/O** - Message Claude from your phone
-- **Isolated group context** - Each group has its own `CLAUDE.md` memory, isolated filesystem, and runs in its own container sandbox with only that filesystem mounted
-- **Main channel** - Your private channel (self-chat) for admin control; every other group is completely isolated
-- **Scheduled tasks** - Recurring jobs that run Claude and can message you back
-- **Web access** - Search and fetch content
-- **Container isolation** - Agents sandboxed in Apple Container (macOS) or Docker (macOS/Linux)
-- **Optional integrations** - Add Gmail (`/add-gmail`) and more via skills
-
-## Usage
-
-Talk to your assistant with the trigger word (default: `@Andy`):
-
-```
-@Andy send an overview of the sales pipeline every weekday morning at 9am (has access to my Obsidian vault folder)
-@Andy review the git history for the past week each Friday and update the README if there's drift
-@Andy every Monday at 8am, compile news on AI developments from Hacker News and TechCrunch and message me a briefing
-```
-
-From the main channel (your self-chat), you can manage groups and tasks:
-```
-@Andy list all scheduled tasks across groups
-@Andy pause the Monday briefing task
-@Andy join the Family Chat group
-```
-
-## Customizing
-
-There are no configuration files to learn. Just tell Claude Code what you want:
-
-- "Change the trigger word to @Bob"
-- "Remember in the future to make responses shorter and more direct"
-- "Add a custom greeting when I say good morning"
-- "Store conversation summaries weekly"
-
-Or run `/customize` for guided changes.
-
-The codebase is small enough that Claude can safely modify it.
-
-## Contributing
-
-**Don't add features. Add skills.**
-
-If you want to add Telegram support, don't create a PR that adds Telegram alongside WhatsApp. Instead, contribute a skill file (`.claude/skills/add-telegram/SKILL.md`) that teaches Claude Code how to transform a NanoClaw installation to use Telegram.
-
-Users then run `/add-telegram` on their fork and get clean code that does exactly what they need, not a bloated system trying to support every use case.
-
-### RFS (Request for Skills)
-
-Skills we'd love to see:
-
-**Communication Channels**
-- `/add-telegram` - Add Telegram as channel. Should give the user option to replace WhatsApp or add as additional channel. Also should be possible to add it as a control channel (where it can trigger actions) or just a channel that can be used in actions triggered elsewhere
-- `/add-slack` - Add Slack
-- `/add-discord` - Add Discord
-
-**Platform Support**
-- `/setup-windows` - Windows via WSL2 + Docker
-
-**Session Management**
-- `/add-clear` - Add a `/clear` command that compacts the conversation (summarizes context while preserving critical information in the same session). Requires figuring out how to trigger compaction programmatically via the Claude Agent SDK.
-
-## Requirements
-
-- macOS or Linux
-- Node.js 20+
-- [Claude Code](https://claude.ai/download)
-- [Apple Container](https://github.com/apple/container) (macOS) or [Docker](https://docker.com/products/docker-desktop) (macOS/Linux)
+Minimal agent runtime for The Reef. Spawns coding agents via the **Pi SDK** (`@mariozechner/pi-coding-agent`) with tmux fallback, exposes **HTTP REST + WebSocket** API.
 
 ## Architecture
 
 ```
-WhatsApp (baileys) --> SQLite --> Polling loop --> Container (Claude Agent SDK) --> Response
+┌─────────────────────────────────────────────┐
+│              reef-core (port 7777)          │
+│                                             │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  │
+│  │  api.ts   │  │  ws.ts   │  │ events.ts│  │
+│  │  (HTTP)   │  │  (WS)    │  │ (EventBus│  │
+│  └─────┬─────┘  └─────┬────┘  └─────┬────┘  │
+│        │              │              │       │
+│  ┌─────┴──────────────┴──────────────┴────┐  │
+│  │            agent.ts                     │  │
+│  │  Pi SDK (createAgentSession)            │  │
+│  │  ↓ fallback                             │  │
+│  │  tmux.ts (claude --print)               │  │
+│  └─────────────┬───────────────────────────┘  │
+│                │                             │
+│  ┌─────────────┴───────────────────────────┐  │
+│  │            db.ts (JSON file store)      │  │
+│  └─────────────────────────────────────────┘  │
+└─────────────────────────────────────────────┘
 ```
 
-Single Node.js process. Agents execute in isolated Linux containers with mounted directories. IPC via filesystem. No daemons, no queues, no complexity.
+### Source Files (6 files, Nanoclaw philosophy)
 
-Key files:
-- `src/index.ts` - Main app: WhatsApp connection, routing, IPC
-- `src/container-runner.ts` - Spawns agent containers
-- `src/task-scheduler.ts` - Runs scheduled tasks
-- `src/db.ts` - SQLite operations
-- `groups/*/CLAUDE.md` - Per-group memory
+| File | Purpose |
+|------|---------|
+| `index.ts` | Entry point |
+| `api.ts` | HTTP REST server + CORS |
+| `ws.ts` | WebSocket server for real-time events |
+| `events.ts` | Internal event bus (bridges agent → WS) |
+| `agent.ts` | Pi SDK integration + tmux fallback |
+| `tmux.ts` | Tmux session management (legacy/fallback) |
+| `db.ts` | JSON file persistence |
 
-## FAQ
+## Setup
 
-**Why WhatsApp and not Telegram/Signal/etc?**
+```bash
+npm install
+npm run build
+npm start         # or: npm run dev (tsx hot-reload)
+```
 
-Because I use WhatsApp. Fork it and run a skill to change it. That's the whole point.
+### Environment Variables
 
-**Why Apple Container instead of Docker?**
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `REEF_PORT` | `7777` | HTTP + WebSocket port |
+| `REEF_DATA_DIR` | `./data` | Session data directory |
+| `REEF_CLAUDE_BIN` | `claude` | Claude CLI binary (tmux fallback) |
+| `ANTHROPIC_API_KEY` | — | Required for Pi SDK |
 
-On macOS, Apple Container is lightweight, fast, and optimized for Apple silicon. But Docker is also fully supported—during `/setup`, you can choose which runtime to use. On Linux, Docker is used automatically.
+## HTTP API
 
-**Can I run this on Linux?**
+### `GET /status`
+Health check + stats.
+```json
+{"ok": true, "version": "0.2.0", "sessions": 3, "running": {"sdk": 1, "tmux": 0}, "wsClients": 2, "uptime": 123.4}
+```
 
-Yes. Run `/setup` and it will automatically configure Docker as the container runtime. Thanks to [@dotsetgreg](https://github.com/dotsetgreg) for contributing the `/convert-to-docker` skill.
+### `POST /sessions`
+Spawn a new agent session.
+```json
+{"task": "Fix the bug in auth.ts", "workdir": "/path/to/project", "model": "claude-sonnet-4-20250514", "backend": "sdk"}
+```
+- `task` (required): The task/prompt for the agent
+- `workdir` (optional): Working directory
+- `model` (optional): Model ID (default: claude-sonnet-4-20250514)
+- `backend` (optional): Force `"sdk"` or `"tmux"` (default: auto-detect)
 
-**Is this secure?**
+Response (201):
+```json
+{"session": {"id": "abc123", "task": "...", "status": "running", "backend": "sdk", ...}}
+```
 
-Agents run in containers, not behind application-level permission checks. They can only access explicitly mounted directories. You should still review what you're running, but the codebase is small enough that you actually can. See [docs/SECURITY.md](docs/SECURITY.md) for the full security model.
+### `GET /sessions`
+List all sessions.
 
-**Why no configuration files?**
+### `GET /sessions/:id`
+Get session details + liveness check.
 
-We don't want configuration sprawl. Every user should customize it to so that the code matches exactly what they want rather than configuring a generic system. If you like having config files, tell Claude to add them.
+### `GET /sessions/:id/output`
+Get accumulated output for a session.
 
-**How do I debug issues?**
+### `POST /sessions/:id/send`
+Send a follow-up message to a running session.
+```json
+{"message": "Also fix the tests"}
+```
 
-Ask Claude Code. "Why isn't the scheduler running?" "What's in the recent logs?" "Why did this message not get a response?" That's the AI-native approach.
+### `DELETE /sessions/:id`
+Kill and remove a session.
 
-**Why isn't the setup working for me?**
+## WebSocket API
 
-I don't know. Run `claude`, then run `/debug`. If claude finds an issue that is likely affecting other users, open a PR to modify the setup SKILL.md.
+Connect to `ws://localhost:7777/ws`
 
-**What changes will be accepted into the codebase?**
+### Server → Client Events
 
-Security fixes, bug fixes, and clear improvements to the base configuration. That's it.
+```json
+{"type": "output",      "sessionId": "abc123", "data": {"text": "...", "streaming": true}, "timestamp": "..."}
+{"type": "status",      "sessionId": "abc123", "data": {"status": "completed"}, "timestamp": "..."}
+{"type": "session.new", "sessionId": "abc123", "data": {"task": "...", "backend": "sdk"}, "timestamp": "..."}
+{"type": "session.end", "sessionId": "abc123", "data": {"reason": "completed"}, "timestamp": "..."}
+{"type": "tool.start",  "sessionId": "abc123", "data": {"toolName": "bash", "args": {...}}, "timestamp": "..."}
+{"type": "tool.end",    "sessionId": "abc123", "data": {"toolName": "bash", "isError": false}, "timestamp": "..."}
+```
 
-Everything else (new capabilities, OS compatibility, hardware support, enhancements) should be contributed as skills.
+### Client → Server Messages
 
-This keeps the base system minimal and lets every user customize their installation without inheriting features they don't want.
+```json
+{"type": "subscribe",     "sessionId": "abc123"}
+{"type": "unsubscribe",   "sessionId": "abc123"}
+{"type": "subscribe_all"}
+{"type": "send",          "sessionId": "abc123", "message": "Do this next"}
+```
+
+By default, new clients receive ALL events. Use `subscribe` to filter to specific sessions.
+
+## Agent Backends
+
+### Pi SDK (Primary)
+Uses `createAgentSession()` from `@mariozechner/pi-coding-agent`. Provides:
+- Proper streaming with structured events
+- Tool use visibility (see what tools the agent calls)
+- Follow-up messages to running sessions
+- Clean abort/cancel
+
+### tmux (Fallback)
+Shells out to `claude --print` in tmux sessions. Used when:
+- Pi SDK packages aren't installed
+- SDK spawn fails
+- Explicitly requested via `backend: "tmux"`
+
+## Development
+
+```bash
+npm run dev          # Start with tsx (auto-reload)
+npm run typecheck    # Type check without building
+npm run build        # Compile to dist/
+```
 
 ## License
 
